@@ -146,3 +146,17 @@ if not data.empty:
 
     st.subheader("📋 Ingested Telemetry Logs")
     st.dataframe(data, width="stretch")
+
+# Raw CAN Bus Sniffer & Diagnostic Panel
+st.divider()
+st.subheader("🛰️ Embedded CAN Bus Frame Sniffer (ISO 11898-1)")
+
+sample_frames = [
+    {"CAN ID": "0x401", "Payload (Hex)": "0C D5 0C D8 0C E0 0D 02", "Decoded Metrics": "Cells 1 - 4 Voltage"},
+    {"CAN ID": "0x402", "Payload (Hex)": "0C D2 0C D9 0C DA 0C DC", "Decoded Metrics": "Cells 5 - 8 Voltage"},
+    {"CAN ID": "0x403", "Payload (Hex)": "0C DB 0C DF 0C D0 0C D6", "Decoded Metrics": "Cells 9 - 12 Voltage"},
+    {"CAN ID": "0x404", "Payload (Hex)": "0C D4 0C D7 0C D9 0C D8", "Decoded Metrics": "Cells 13 - 16 Voltage"},
+    {"CAN ID": "0x301", "Payload (Hex)": "13 F1 00 E6 00 00 00 00", "Decoded Metrics": "Pack Voltage (51.05V), Current (23.0A)"},
+    {"CAN ID": "0x302", "Payload (Hex)": "20 03 B1 00 00 00 00 00", "Decoded Metrics": "BMS Temp (32.0°C), SoC (94.5%)"}
+]
+st.table(pd.DataFrame(sample_frames))
