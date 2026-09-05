@@ -1,6 +1,6 @@
 # EV Battery Telemetry System # EV Battery Telemetry System & Analytics Dashboard Analytics Dashboard
 
-[![Streamlit App](https://static.streamlit.io/badges/streamlit_badge_black_white.svg)](https://ev-telemetry-dashboard-grznvq...streamlit.app)
+[![Streamlit App](https://static.streamlit.io/badges/streamlit_badge_black_white.svg)](https://ev-telemetry-dashboard-grznvqxirepa4plqzfaxcp.streamlit.app)
 
 An end-to-end telemetry pipeline simulating Battery Management System (BMS) data acquisition, local SQLite time-series persistence, and interactive real-time telemetry visualization.
 
