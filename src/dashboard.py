@@ -22,12 +22,23 @@ def init_db():
             current_draw REAL,
             bms_temp REAL,
             soc_percent REAL,
-            soh_percent REAL,
-            cycle_count INTEGER,
+            soh_percent REAL DEFAULT 98.5,
+            cycle_count INTEGER DEFAULT 142,
             status_flag TEXT
         )
     """)
     conn.commit()
+
+    # Automatic schema migration for existing SQLite files
+    cur.execute("PRAGMA table_info(battery_telemetry)")
+    columns = [row[1] for row in cur.fetchall()]
+    
+    if "soh_percent" not in columns:
+        cur.execute("ALTER TABLE battery_telemetry ADD COLUMN soh_percent REAL DEFAULT 98.5")
+    if "cycle_count" not in columns:
+        cur.execute("ALTER TABLE battery_telemetry ADD COLUMN cycle_count INTEGER DEFAULT 142")
+    conn.commit()
+
     cur.execute("SELECT COUNT(*) FROM battery_telemetry")
     if cur.fetchone()[0] == 0:
         seed_batch(conn, cur, count=25)
@@ -37,7 +48,6 @@ def seed_batch(conn, cur, count=10):
     base_voltage = 52.0
     soc = 96.0
     base_cycles = 142
-    nominal_cap = 50.0  # 50 Ah nominal pack
 
     for i in range(count):
         inject_thermal = (i in [6, 7])
@@ -47,7 +57,6 @@ def seed_batch(conn, cur, count=10):
         voltage = round(base_voltage - (current * 0.04) + random.uniform(-0.15, 0.15), 2)
         soc = round(max(0.0, soc - (current * 0.008)), 2)
 
-        # Semi-empirical degradation model: ~0.015% capacity fade per cycle, accelerated by heat
         cycles = base_cycles + i
         thermal_penalty = 1.8 if temp >= 45.0 else 1.0
         degradation = (cycles * 0.018 * thermal_penalty)
@@ -83,8 +92,8 @@ with st.sidebar:
     mode = st.radio("Telemetry Stream Source", ["Cloud Software Emulation", "Hardware Serial (COM / USB)"])
     
     if mode == "Hardware Serial (COM / USB)":
-        com_port = st.text_input("Port", value="COM3")
-        baud = st.selectbox("Baud Rate", [9600, 115200], index=1)
+        st.text_input("Port", value="COM3")
+        st.selectbox("Baud Rate", [9600, 115200], index=1)
         st.caption("Listening for CSV/JSON stream from Arduino or ESP32...")
     else:
         if st.button("Generate Telemetry Batch"):
@@ -116,6 +125,12 @@ def load_data():
 data = load_data()
 
 if not data.empty:
+    # Ensure columns exist safely in dataframe
+    if "soh_percent" not in data.columns:
+        data["soh_percent"] = 98.5
+    if "cycle_count" not in data.columns:
+        data["cycle_count"] = 142
+
     latest = data.iloc[0]
     status = latest.get("status_flag", "NORMAL")
 
@@ -175,6 +190,18 @@ if not data.empty:
     st.subheader("📈 Real-Time Powertrain Dynamics")
     chart_data = data.sort_values("id")
     st.line_chart(chart_data.set_index("timestamp")[["pack_voltage", "current_draw", "bms_temp"]])
+
+    # CAN Sniffer
+    st.subheader("🛰️ Embedded CAN Bus Frame Sniffer (ISO 11898-1)")
+    sample_frames = [
+        {"CAN ID": "0x401", "Payload (Hex)": "0C D5 0C D8 0C E0 0D 02", "Decoded Metrics": "Cells 1 - 4 Voltage"},
+        {"CAN ID": "0x402", "Payload (Hex)": "0C D2 0C D9 0C DA 0C DC", "Decoded Metrics": "Cells 5 - 8 Voltage"},
+        {"CAN ID": "0x403", "Payload (Hex)": "0C DB 0C DF 0C D0 0C D6", "Decoded Metrics": "Cells 9 - 12 Voltage"},
+        {"CAN ID": "0x404", "Payload (Hex)": "0C D4 0C D7 0C D9 0C D8", "Decoded Metrics": "Cells 13 - 16 Voltage"},
+        {"CAN ID": "0x301", "Payload (Hex)": "13 F1 00 E6 00 00 00 00", "Decoded Metrics": "Pack Voltage (51.05V), Current (23.0A)"},
+        {"CAN ID": "0x302", "Payload (Hex)": "20 03 B1 00 00 00 00 00", "Decoded Metrics": "BMS Temp (32.0°C), SoC (94.5%)"}
+    ]
+    st.table(pd.DataFrame(sample_frames))
 
     st.subheader("📋 Ingested Telemetry Logs")
     st.dataframe(data, width="stretch")
