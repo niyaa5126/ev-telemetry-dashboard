@@ -23,3 +23,8 @@ pip install -r requirements.txt
 python src/logger.py
 python -m streamlit run src/dashboard.py
 ```
+
+### Embedded CAN Bus & 16S Balancer Modules
+- **CAN Frame Deserializer (`firmware/can_decoder.py`)**: Parses raw 8-byte hexadecimal payloads into millivolt-accurate cell voltages across arbitration IDs `0x401`–`0x404`.
+- **16S Active/Passive Cell Balancer**: Calculates dynamic cell voltage spread ($\Delta V$) and simulates passive shunt resistor dissipation for overvoltage cells.
+- **Diagnostics Panel**: Integrated ISO 11898-1 bus sniffer displaying arbitration IDs, payload bytes, and decoded signals.
