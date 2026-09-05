@@ -5,8 +5,8 @@ import numpy as np
 import random
 import os
 
-st.set_page_config(page_title="EV Battery Telemetry & 16S BMS Balancer", layout="wide")
-st.title("⚡ EV Battery Telemetry & 16S BMS Balancer")
+st.set_page_config(page_title="EV Battery Telemetry, BMS Balancer & SoH Monitor", layout="wide")
+st.title("⚡ EV Battery Telemetry, BMS Balancer & SoH Monitor")
 
 DB_PATH = "data/telemetry.db"
 
@@ -22,6 +22,8 @@ def init_db():
             current_draw REAL,
             bms_temp REAL,
             soc_percent REAL,
+            soh_percent REAL,
+            cycle_count INTEGER,
             status_flag TEXT
         )
     """)
@@ -33,14 +35,23 @@ def init_db():
 
 def seed_batch(conn, cur, count=10):
     base_voltage = 52.0
-    soc = 98.0
+    soc = 96.0
+    base_cycles = 142
+    nominal_cap = 50.0  # 50 Ah nominal pack
+
     for i in range(count):
         inject_thermal = (i in [6, 7])
         inject_overcurrent = (i in [14, 15])
-        temp = round(random.uniform(48.5, 54.0), 1) if inject_thermal else round(random.uniform(28.0, 41.0), 1)
-        current = round(random.uniform(45.0, 58.0), 2) if inject_overcurrent else round(random.uniform(5.0, 24.0), 2)
+        temp = round(random.uniform(48.5, 53.0), 1) if inject_thermal else round(random.uniform(28.0, 39.0), 1)
+        current = round(random.uniform(45.0, 56.0), 2) if inject_overcurrent else round(random.uniform(5.0, 24.0), 2)
         voltage = round(base_voltage - (current * 0.04) + random.uniform(-0.15, 0.15), 2)
         soc = round(max(0.0, soc - (current * 0.008)), 2)
+
+        # Semi-empirical degradation model: ~0.015% capacity fade per cycle, accelerated by heat
+        cycles = base_cycles + i
+        thermal_penalty = 1.8 if temp >= 45.0 else 1.0
+        degradation = (cycles * 0.018 * thermal_penalty)
+        soh = round(max(50.0, 100.0 - degradation), 2)
 
         status = "NORMAL"
         if temp >= 45.0:
@@ -49,47 +60,51 @@ def seed_batch(conn, cur, count=10):
             status = "WARNING: OVERCURRENT DISCHARGE"
         elif voltage < 44.0:
             status = "CRITICAL: UNDERVOLTAGE SAG"
+        elif soh < 80.0:
+            status = "WARNING: BATTERY EOL DEGRADATION (SOH < 80%)"
 
         cur.execute("""
-            INSERT INTO battery_telemetry (pack_voltage, current_draw, bms_temp, soc_percent, status_flag)
-            VALUES (?, ?, ?, ?, ?)
-        """, (voltage, current, temp, soc, status))
+            INSERT INTO battery_telemetry (pack_voltage, current_draw, bms_temp, soc_percent, soh_percent, cycle_count, status_flag)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+        """, (voltage, current, temp, soc, soh, cycles, status))
     conn.commit()
 
 init_db()
 
-# Initialize 16-cell state in Streamlit session memory
+# Session State for 16-cell balancing
 if "cells" not in st.session_state:
     st.session_state.cells = [round(3.25 + random.uniform(-0.02, 0.03), 3) for _ in range(16)]
-    st.session_state.cells[4] = 3.330  # Intentional high-voltage outlier
-    st.session_state.cells[11] = 3.210 # Intentional low-voltage outlier
+    st.session_state.cells[4] = 3.330
+    st.session_state.cells[11] = 3.210
 
-# Sidebar Controls
+# Sidebar
 with st.sidebar:
-    st.header("Powertrain Simulator")
-    if st.button("Generate Telemetry Batch"):
-        conn = sqlite3.connect(DB_PATH)
-        cur = conn.cursor()
-        seed_batch(conn, cur, count=10)
-        conn.close()
-        st.success("New CAN frames ingested!")
-        st.rerun()
+    st.header("Powertrain Mode")
+    mode = st.radio("Telemetry Stream Source", ["Cloud Software Emulation", "Hardware Serial (COM / USB)"])
+    
+    if mode == "Hardware Serial (COM / USB)":
+        com_port = st.text_input("Port", value="COM3")
+        baud = st.selectbox("Baud Rate", [9600, 115200], index=1)
+        st.caption("Listening for CSV/JSON stream from Arduino or ESP32...")
+    else:
+        if st.button("Generate Telemetry Batch"):
+            conn = sqlite3.connect(DB_PATH)
+            cur = conn.cursor()
+            seed_batch(conn, cur, count=10)
+            conn.close()
+            st.success("Batch ingested!")
+            st.rerun()
 
     st.divider()
     st.header("16S Cell Balancer Control")
-    balance_threshold = st.slider("Bleed Threshold (mV)", min_value=10, max_value=50, value=25)
-    
+    balance_threshold = st.slider("Bleed Threshold (mV)", 10, 50, 25)
     if st.button("Execute Passive Balance Cycle"):
         min_v = min(st.session_state.cells)
-        # Bleed cells higher than min_v + threshold
-        updated_cells = []
-        for v in st.session_state.cells:
-            if (v - min_v) * 1000 > balance_threshold:
-                updated_cells.append(round(v - 0.015, 3))  # Simulated shunt resistor discharge
-            else:
-                updated_cells.append(v)
-        st.session_state.cells = updated_cells
-        st.success("Passive shunt balancing pulse applied!")
+        st.session_state.cells = [
+            round(v - 0.015, 3) if (v - min_v) * 1000 > balance_threshold else v
+            for v in st.session_state.cells
+        ]
+        st.success("Passive shunt discharge cycle applied!")
         st.rerun()
 
 def load_data():
@@ -111,52 +126,57 @@ if not data.empty:
     else:
         st.success("✅ Powertrain & BMS Status: ALL SYSTEMS NOMINAL")
 
-    col1, col2, col3, col4 = st.columns(4)
-    col1.metric("Pack Voltage", f"{latest['pack_voltage']} V")
-    col2.metric("Current Draw", f"{latest['current_draw']} A")
-    col3.metric("BMS Temp", f"{latest['bms_temp']} °C")
-    col4.metric("State of Charge", f"{latest['soc_percent']} %")
+    # Key Telemetry Cards
+    c1, c2, c3, c4, c5 = st.columns(5)
+    c1.metric("Pack Voltage", f"{latest['pack_voltage']} V")
+    c2.metric("Current Draw", f"{latest['current_draw']} A")
+    c3.metric("BMS Temp", f"{latest['bms_temp']} °C")
+    c4.metric("State of Charge (SoC)", f"{latest['soc_percent']} %")
+    c5.metric("State of Health (SoH)", f"{latest['soh_percent']} %", delta=f"{round(latest['soh_percent'] - 100, 1)}%")
 
     st.divider()
 
-    # 16S Cell Monitoring Section
-    st.subheader("🔋 16S Series Cell Voltages & Passive Bleed Status")
+    # Degradation Analysis Section
+    st.subheader("🔬 Battery Life & State of Health (SoH) Analytics")
+    col_soh1, col_soh2 = st.columns(2)
+    with col_soh1:
+        st.markdown(f"""
+        - **Equivalent Full Cycles (EFC)**: `{latest['cycle_count']}` cycles
+        - **Nominal Pack Capacity**: `50.0 Ah`
+        - **Remaining Usable Capacity**: `{round(50.0 * (latest['soh_percent'] / 100.0), 2)} Ah`
+        - **End-of-Life (EOL) Threshold**: `80.0% SoH` (Automotive Standard)
+        """)
+    with col_soh2:
+        chart_soh = data.sort_values("id")
+        st.line_chart(chart_soh.set_index("cycle_count")["soh_percent"])
+
+    st.divider()
+
+    # 16S Cell Balancer Section
+    st.subheader("🔋 16S Series Cell Voltages & Shunt Balancing")
     cells = st.session_state.cells
     delta_v_mv = round((max(cells) - min(cells)) * 1000, 1)
 
-    c1, c2, c3 = st.columns(3)
-    c1.metric("Max Cell Voltage", f"{max(cells):.3f} V")
-    c2.metric("Min Cell Voltage", f"{min(cells):.3f} V")
-    c3.metric("Cell Delta (ΔV)", f"{delta_v_mv} mV", delta=f"{'-' if delta_v_mv > 30 else 'OK'}")
+    bc1, bc2, bc3 = st.columns(3)
+    bc1.metric("Max Cell Voltage", f"{max(cells):.3f} V")
+    bc2.metric("Min Cell Voltage", f"{min(cells):.3f} V")
+    bc3.metric("Cell Delta (ΔV)", f"{delta_v_mv} mV", delta="EXCESSIVE" if delta_v_mv > 30 else "OK")
 
     cell_df = pd.DataFrame({
         "Cell Index": [f"Cell {i+1}" for i in range(16)],
         "Voltage (V)": cells,
-        "Balancing Active": ["BLEED ACTIVE" if (v - min(cells))*1000 > balance_threshold else "IDLE" for v in cells]
+        "Bleed Status": ["BLEED ACTIVE" if (v - min(cells))*1000 > balance_threshold else "IDLE" for v in cells]
     })
-
     st.bar_chart(cell_df.set_index("Cell Index")["Voltage (V)"])
-    st.dataframe(cell_df.T, width="stretch")
 
     st.divider()
 
+    # Powertrain Dynamics & Logs
     st.subheader("📈 Real-Time Powertrain Dynamics")
     chart_data = data.sort_values("id")
     st.line_chart(chart_data.set_index("timestamp")[["pack_voltage", "current_draw", "bms_temp"]])
 
     st.subheader("📋 Ingested Telemetry Logs")
     st.dataframe(data, width="stretch")
-
-# Raw CAN Bus Sniffer & Diagnostic Panel
-st.divider()
-st.subheader("🛰️ Embedded CAN Bus Frame Sniffer (ISO 11898-1)")
-
-sample_frames = [
-    {"CAN ID": "0x401", "Payload (Hex)": "0C D5 0C D8 0C E0 0D 02", "Decoded Metrics": "Cells 1 - 4 Voltage"},
-    {"CAN ID": "0x402", "Payload (Hex)": "0C D2 0C D9 0C DA 0C DC", "Decoded Metrics": "Cells 5 - 8 Voltage"},
-    {"CAN ID": "0x403", "Payload (Hex)": "0C DB 0C DF 0C D0 0C D6", "Decoded Metrics": "Cells 9 - 12 Voltage"},
-    {"CAN ID": "0x404", "Payload (Hex)": "0C D4 0C D7 0C D9 0C D8", "Decoded Metrics": "Cells 13 - 16 Voltage"},
-    {"CAN ID": "0x301", "Payload (Hex)": "13 F1 00 E6 00 00 00 00", "Decoded Metrics": "Pack Voltage (51.05V), Current (23.0A)"},
-    {"CAN ID": "0x302", "Payload (Hex)": "20 03 B1 00 00 00 00 00", "Decoded Metrics": "BMS Temp (32.0°C), SoC (94.5%)"}
-]
-st.table(pd.DataFrame(sample_frames))
+else:
+    st.warning("No telemetry records found.")
